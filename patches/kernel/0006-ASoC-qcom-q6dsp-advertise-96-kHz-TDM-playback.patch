@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Halhadus <eneshakans45@proton.me>
+Date: Wed, 14 Oct 2026 12:23:22 +0300
+Subject: [PATCH 06/13] ASoC: qcom: q6dsp: advertise 96 kHz TDM playback
+
+Include 96 kHz in the TDM playback capability mask. Static PCM capability
+intersection otherwise rejects the rate used by the Marble TDM backend.
+
+Signed-off-by: Halhadus <eneshakans45@proton.me>
+---
+ sound/soc/qcom/qdsp6/q6dsp-lpass-ports.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/sound/soc/qcom/qdsp6/q6dsp-lpass-ports.c b/sound/soc/qcom/qdsp6/q6dsp-lpass-ports.c
+index e5cd82f77b5520003ce597c6b70e71ad31965b04..f03dcd3255697cc9cab9fed1944d1d9513814bc8 100644
+--- a/sound/soc/qcom/qdsp6/q6dsp-lpass-ports.c
++++ b/sound/soc/qcom/qdsp6/q6dsp-lpass-ports.c
+@@ -12,6 +12,7 @@
+ 			.stream_name = pre" TDM"#num" Playback",	\
+ 			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |\
+ 				SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |\
++				SNDRV_PCM_RATE_96000 |\
+ 				SNDRV_PCM_RATE_176400,			\
+ 			.formats = SNDRV_PCM_FMTBIT_S16_LE |		\
+ 				   SNDRV_PCM_FMTBIT_S24_LE |		\

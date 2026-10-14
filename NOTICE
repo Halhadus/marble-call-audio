@@ -1,0 +1,11 @@
+Kernel patches modify Linux sources under their existing SPDX licenses.
+The profile builder is GPL-2.0-only. See LICENSE.
+
+UCM configuration is derived from iLtanaka/marble-device-support:
+https://github.com/iLtanaka/marble-device-support/tree/main/alsa/ucm2
+That source tree supplies no UCM license notice.
+
+profiles/marble/voice.json and firmware/qcom/marble-voice-active.bin contain
+graph/configuration/calibration bytes captured from the vendor audio stack.
+No license grant for those vendor payloads is asserted by this repository.
+The kernel and builder license does not relicense those bytes.

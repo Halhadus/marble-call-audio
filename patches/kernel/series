@@ -1,0 +1,13 @@
+0001-soc-qcom-apr-validate-GPR-frames-and-drain-released-ports.patch
+0002-ASoC-qcom-audioreach-support-voice-graph-descriptors.patch
+0003-ASoC-qcom-q6apm-preserve-graph-and-mapping-ownership-on-errors.patch
+0004-ASoC-qcom-q6apm-add-hostless-graph-transport.patch
+0005-ASoC-qcom-q6apm-dai-retain-DMA-until-DSP-teardown-completes.patch
+0006-ASoC-qcom-q6dsp-advertise-96-kHz-TDM-playback.patch
+0007-ASoC-lpass-tx-macro-track-and-mute-capture-channels.patch
+0008-ASoC-qcom-sdw-preserve-codec-stream-ownership.patch
+0009-ASoC-aw88261-retain-per-profile-volume-and-playback-mute.patch
+0010-dt-bindings-sound-qcom-describe-speaker-earpiece-routing.patch
+0011-ASoC-qcom-q6apm-add-hostless-voice-session-control.patch
+0012-ASoC-qcom-sc8280xp-connect-Marble-handset-voice-routes.patch
+0013-arm64-dts-qcom-marble-assign-earpiece-GPIO-to-sound-card.patch

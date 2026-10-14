@@ -1,0 +1,299 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Halhadus <eneshakans45@proton.me>
+Date: Wed, 14 Oct 2026 12:23:22 +0300
+Subject: [PATCH 12/13] ASoC: qcom: sc8280xp: connect Marble handset voice
+ routes
+
+Expose the optional speaker-earpiece GPIO as an ALSA switch. Add private
+Marble RX/TX physical links using the existing codec and TDM backends.
+Leave voice BCLK ownership with the DSP while retaining the LPASS vote;
+keep normal media clock requests unchanged.
+
+Link only Music profile gains to the Speaker virtual master, limit them
+to the board baseline and initialize Receiver gain independently. Select
+the ALSA virtual-master dependency used by these controls.
+
+Signed-off-by: Halhadus <eneshakans45@proton.me>
+---
+ sound/soc/qcom/Kconfig    |   1 +
+ sound/soc/qcom/sc8280xp.c | 193 ++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 186 insertions(+), 8 deletions(-)
+
+diff --git a/sound/soc/qcom/Kconfig b/sound/soc/qcom/Kconfig
+index e6e24f3b99222d32e81a292af8f31db9db0a55eb..5e3cd399631f0aadac06cec54ee0ed774d896743 100644
+--- a/sound/soc/qcom/Kconfig
++++ b/sound/soc/qcom/Kconfig
+@@ -202,6 +202,7 @@ config SND_SOC_SC8280XP
+ 	select SND_SOC_QDSP6
+ 	select SND_SOC_QCOM_COMMON
+ 	select SND_SOC_QCOM_SDW
++	select SND_VMASTER
+ 	help
+ 	  To add support for audio on Qualcomm Technologies Inc.
+ 	  SC8280XP SoC-based systems.
+diff --git a/sound/soc/qcom/sc8280xp.c b/sound/soc/qcom/sc8280xp.c
+index 9e7728613dfc4d5c247e003e01089014c08fff98..6eb8fde7b39169b13c49c29dcc5c10f182e47be0 100644
+--- a/sound/soc/qcom/sc8280xp.c
++++ b/sound/soc/qcom/sc8280xp.c
+@@ -3,16 +3,22 @@
+ 
+ #include <dt-bindings/sound/qcom,q6afe.h>
+ #include <linux/clk.h>
++#include <linux/cleanup.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
++#include <linux/slab.h>
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+ #include <sound/pcm.h>
+ #include <sound/pcm_params.h>
+ #include <linux/soundwire/sdw.h>
+ #include <sound/jack.h>
++#include <sound/control.h>
++#include <sound/tlv.h>
+ #include <linux/input-event-codes.h>
+ #include "qdsp6/q6afe.h"
++#include "qdsp6/q6apm-voice-backend.h"
+ #include "common.h"
+ #include "sdw.h"
+ 
+@@ -32,8 +38,49 @@ struct sc8280xp_snd_data {
+ 	struct snd_soc_jack jack;
+ 	struct snd_soc_jack dp_jack[8];
+ 	bool jack_setup;
++	struct gpio_desc *speaker_earpiece;
++	struct mutex speaker_earpiece_lock; /* Serialize the physical route control. */
+ };
+ 
++static int sc8280xp_earpiece_get(struct snd_kcontrol *kcontrol,
++				 struct snd_ctl_elem_value *value)
++{
++	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
++	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
++	int state;
++
++	guard(mutex)(&data->speaker_earpiece_lock);
++	state = gpiod_get_value_cansleep(data->speaker_earpiece);
++	if (state < 0)
++		return state;
++	value->value.integer.value[0] = state;
++	return 0;
++}
++
++static int sc8280xp_earpiece_put(struct snd_kcontrol *kcontrol,
++				 struct snd_ctl_elem_value *value)
++{
++	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
++	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
++	long requested = value->value.integer.value[0];
++	int state;
++
++	if (requested != 0 && requested != 1)
++		return -EINVAL;
++	guard(mutex)(&data->speaker_earpiece_lock);
++	state = gpiod_get_value_cansleep(data->speaker_earpiece);
++	if (state < 0)
++		return state;
++	if (state == requested)
++		return 0;
++	state = gpiod_set_value_cansleep(data->speaker_earpiece, requested);
++	return state ? state : 1;
++}
++
++static const struct snd_kcontrol_new sc8280xp_earpiece_control =
++	SOC_SINGLE_BOOL_EXT("Speaker Earpiece Switch", 0,
++			    sc8280xp_earpiece_get, sc8280xp_earpiece_put);
++
+ static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
+ {
+ 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+@@ -166,13 +213,16 @@ static int sc8280xp_snd_startup(struct snd_pcm_substream *substream)
+ 		if (ret)
+ 			return ret;
+ 
+-		ret = clk_set_rate(data->tdm_bclk,
+-				   data->tdm_rate * data->tdm_slots * data->tdm_slot_width);
+-		if (!ret)
+-			ret = clk_prepare_enable(data->tdm_bclk);
+-		if (ret) {
+-			clk_disable_unprepare(data->tdm_vote);
+-			return ret;
++		/* The raw voice endpoint supplies its captured clock attributes. */
++		if (!q6apm_voice_backend_link(rtd)) {
++			ret = clk_set_rate(data->tdm_bclk,
++					   data->tdm_rate * data->tdm_slots * data->tdm_slot_width);
++			if (!ret)
++				ret = clk_prepare_enable(data->tdm_bclk);
++			if (ret) {
++				clk_disable_unprepare(data->tdm_vote);
++				return ret;
++			}
+ 		}
+ 	}
+ 
+@@ -188,7 +238,8 @@ static void sc8280xp_snd_shutdown(struct snd_pcm_substream *substream)
+ 	qcom_snd_sdw_shutdown(substream);
+ 
+ 	if (sc8280xp_is_tdm(cpu_dai)) {
+-		clk_disable_unprepare(data->tdm_bclk);
++		if (!q6apm_voice_backend_link(rtd))
++			clk_disable_unprepare(data->tdm_bclk);
+ 		clk_disable_unprepare(data->tdm_vote);
+ 	}
+ }
+@@ -214,6 +265,118 @@ static void sc8280xp_add_be_ops(struct snd_soc_card *card)
+ 	}
+ }
+ 
++static void sc8280xp_put_voice_node(void *node)
++{
++	of_node_put(node);
++}
++
++static int sc8280xp_add_voice_links(struct snd_soc_card *card)
++{
++	static const struct snd_soc_dapm_route voice_routes[] = {
++		{ "AMIC5", NULL, "MIC BIAS3" },
++	};
++	struct snd_soc_dai_link *links, *rx = NULL, *tx = NULL;
++	struct snd_soc_dai_link_component *platform;
++	struct device_node *dais;
++	int i, ret, count = card->num_links;
++
++	if (!of_machine_is_compatible("xiaomi,marble"))
++		return 0;
++	for (i = 0; i < count; i++) {
++		struct snd_soc_dai_link *link = &card->dai_link[i];
++
++		if (link->no_pcm && link->id == TERTIARY_TDM_RX_0)
++			rx = link;
++		else if (link->no_pcm && link->id == TX_CODEC_DMA_TX_3)
++			tx = link;
++	}
++	if (!rx || !tx)
++		return -EINVAL;
++	links = devm_kcalloc(card->dev, count + 2, sizeof(*links), GFP_KERNEL);
++	platform = devm_kcalloc(card->dev, 2, sizeof(*platform), GFP_KERNEL);
++	if (!links || !platform)
++		return -ENOMEM;
++	/* Frontends are loaded from topology, so no FE exists in the DT link array. */
++	dais = of_get_compatible_child(rx->platforms[0].of_node, "qcom,q6apm-dais");
++	if (!dais)
++		return -ENODEV;
++	ret = devm_add_action_or_reset(card->dev, sc8280xp_put_voice_node, dais);
++	if (ret)
++		return ret;
++	memcpy(links, card->dai_link, count * sizeof(*links));
++	for (i = 0; i < 2; i++) {
++		struct snd_soc_dai_link *link = &links[count + i];
++
++		*link = i ? *tx : *rx;
++		platform[i].of_node = dais;
++		link->platforms = &platform[i];
++		link->num_platforms = 1;
++		link->name = i ? Q6APM_VOICE_TX_LINK : Q6APM_VOICE_RX_LINK;
++		link->stream_name = link->name;
++		/* Leave topology PCM IDs 0..2 and BE base 16 untouched. */
++		link->id = 14 + i;
++		link->no_pcm = 0;
++		link->dynamic = 0;
++		link->playback_only = !i;
++		link->capture_only = i;
++		link->be_hw_params_fixup = NULL;
++	}
++	card->dai_link = links;
++	card->num_links = count + 2;
++	card->dapm_routes = voice_routes;
++	card->num_dapm_routes = ARRAY_SIZE(voice_routes);
++	return 0;
++}
++
++/* Speaker volume attenuates Music only; Receiver retains its own full range. */
++static const DECLARE_TLV_DB_SCALE(sc8280xp_music_tlv, -8250, 25, 0);
++
++static int sc8280xp_snd_late_probe(struct snd_soc_card *card)
++{
++	static const char * const names[] = {
++		"Speaker Top Music Playback Volume",
++		"Speaker Bottom Music Playback Volume",
++	};
++	struct snd_ctl_elem_value *value __free(kfree) = kzalloc_obj(*value);
++	struct snd_kcontrol *followers[ARRAY_SIZE(names)], *receiver, *master;
++	int i, ret;
++
++	if (!of_machine_is_compatible("xiaomi,marble"))
++		return 0;
++	if (!value)
++		return -ENOMEM;
++	for (i = 0; i < ARRAY_SIZE(names); i++) {
++		followers[i] = snd_ctl_find_id_mixer(card->snd_card, names[i]);
++		if (!followers[i])
++			return -ENODEV;
++		ret = snd_soc_limit_volume(card, names[i], 330);
++		if (ret < 0)
++			return ret;
++		value->value.integer.value[0] = 330;
++		ret = followers[i]->put(followers[i], value);
++		if (ret < 0)
++			return ret;
++	}
++	receiver = snd_ctl_find_id_mixer(card->snd_card, "Speaker Top Receiver Playback Volume");
++	if (!receiver)
++		return -ENODEV;
++	value->value.integer.value[0] = 360;
++	ret = receiver->put(receiver, value);
++	if (ret < 0)
++		return ret;
++	master = snd_ctl_make_virtual_master("Speaker Playback Volume", sc8280xp_music_tlv);
++	if (!master)
++		return -ENOMEM;
++	for (i = 0; i < ARRAY_SIZE(names); i++) {
++		ret = snd_ctl_add_follower(master, followers[i]);
++		if (ret < 0) {
++			snd_ctl_free_one(master);
++			return ret;
++		}
++	}
++	return snd_ctl_add(card->snd_card, master);
++}
++
+ static int sc8280xp_platform_probe(struct platform_device *pdev)
+ {
+ 	struct snd_soc_card *card;
+@@ -230,6 +393,7 @@ static int sc8280xp_platform_probe(struct platform_device *pdev)
+ 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+ 	if (!data)
+ 		return -ENOMEM;
++	mutex_init(&data->speaker_earpiece_lock);
+ 
+ 	data->tdm_vote = devm_clk_get_optional(dev, "tdm-vote");
+ 	if (IS_ERR(data->tdm_vote))
+@@ -239,6 +403,15 @@ static int sc8280xp_platform_probe(struct platform_device *pdev)
+ 	if (IS_ERR(data->tdm_bclk))
+ 		return dev_err_probe(dev, PTR_ERR(data->tdm_bclk), "failed to get tdm-bclk clock\n");
+ 
++	data->speaker_earpiece = devm_gpiod_get_optional(dev, "speaker-earpiece", GPIOD_OUT_LOW);
++	if (IS_ERR(data->speaker_earpiece))
++		return dev_err_probe(dev, PTR_ERR(data->speaker_earpiece),
++				     "failed to get speaker-earpiece GPIO\n");
++	if (data->speaker_earpiece) {
++		card->controls = &sc8280xp_earpiece_control;
++		card->num_controls = 1;
++	}
++
+ 	data->tdm_slots = 2;
+ 	data->tdm_slot_width = 32;
+ 	data->tdm_rate = 48000;
+@@ -263,7 +436,11 @@ static int sc8280xp_platform_probe(struct platform_device *pdev)
+ 		return ret;
+ 
+ 	card->driver_name = of_device_get_match_data(dev);
++	card->late_probe = sc8280xp_snd_late_probe;
+ 	sc8280xp_add_be_ops(card);
++	ret = sc8280xp_add_voice_links(card);
++	if (ret)
++		return ret;
+ 	return devm_snd_soc_register_card(dev, card);
+ }
+ 
